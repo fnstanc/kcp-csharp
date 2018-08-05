@@ -27,6 +27,7 @@ namespace KcpSharp.v1 {
         private Status status_ = Status.None;
         private UInt32 connectStartTime_;
         private UInt32 lastConnectReqTime_;
+        private UInt32 lastRecvTime_;
 
         private SwitchQueue<byte[]> recvQueue_ = new SwitchQueue<byte[]>(128);
 
@@ -78,7 +79,7 @@ namespace KcpSharp.v1 {
 
             needUpdate_ = false;
             nextUpdateTime_ = 0;
-
+            lastRecvTime_ = 0;
             connectStartTime_ = 0;
             lastConnectReqTime_ = 0;
             recvQueue_.Clear();
@@ -123,7 +124,7 @@ namespace KcpSharp.v1 {
 
             switch(status_) {
                 case Status.Connecting: {
-                    HandleConnectAck();
+                    HandleConnectAck(current);
                     if (ConnectTimeout(current))
                     {
 
@@ -140,9 +141,15 @@ namespace KcpSharp.v1 {
                     }
                 } break;
                 case Status.Connected: {
-                    ProcessRecvQueue();
-
-                    if (needUpdate_ || current >= nextUpdateTime_)
+                    ProcessRecvQueue(current);
+                    if (SessionTimeout(current))
+                    {
+                        uint conv = conv_;
+                        Clean();
+                        status_ = Status.Timemout;
+                        eventCallback_(conv, KcpEvent.KCP_EV_DISCONNECT, null, "Timeout");
+                    }
+                    else if (needUpdate_ || current >= nextUpdateTime_)
                     {
                         kcp_.Update(current);
                         nextUpdateTime_ = kcp_.Check(current);
@@ -183,7 +190,7 @@ namespace KcpSharp.v1 {
                 udpClient_.Send(buf, size);
         }
 
-        void HandleConnectAck()
+        void HandleConnectAck(UInt32 now)
         {
             if (recvQueue_.Empty())
                 recvQueue_.Switch();
@@ -196,6 +203,7 @@ namespace KcpSharp.v1 {
 
                 if (kcpCommand_.cmd == KcpCmd.KCP_CMD_CONNECT_ACK) {
                     InitKcp(kcpCommand_.conv);
+                    lastRecvTime_ = now;
                     status_ = Status.Connected;
                     eventCallback_(conv_, KcpEvent.KCP_EV_CONNECT, null, null);
                     break;
@@ -203,7 +211,7 @@ namespace KcpSharp.v1 {
             }
         }
 
-        void ProcessRecvQueue()
+        void ProcessRecvQueue(UInt32 now)
         {
             if (recvQueue_.Empty())
                 recvQueue_.Switch();
@@ -211,6 +219,8 @@ namespace KcpSharp.v1 {
             while (status_ == Status.Connected && !recvQueue_.Empty())
             {
                 var buf = recvQueue_.Pop();
+
+                lastRecvTime_ = now;
 
                 UInt32 conv = 0;
                 if (KCP.ikcp_decode32u(buf, 0, ref conv) < 0) {
@@ -266,6 +276,10 @@ namespace KcpSharp.v1 {
             int sz = cmd.Encode(cmdBuf_, cmdBuf_.Length);
             if (sz > 0)
                 SendUdpPacket(cmdBuf_, sz);
+        }
+
+        private bool SessionTimeout(UInt32 current) {
+            return current - lastRecvTime_ > KcpConst.KCP_SESSION_TIME_OUT;
         }
     }
 
