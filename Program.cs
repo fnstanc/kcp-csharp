@@ -3,67 +3,40 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
+using KcpSharp;
 
 class Program
 {
     static void test_v1(string host, UInt16 port)
     {
-        var wait_response = true;
+        bool stop = false;
 
-        KcpProject.v1.UdpSocket client = null;
+        KcpSharp.v1.KcpClient client = null;
 
-        client = new KcpProject.v1.UdpSocket((KcpProject.v1.UdpSocket.cliEvent ev, byte[] buf, string err) =>
+        client = new KcpSharp.v1.KcpClient((uint conv, KcpSharp.KcpEvent ev, byte[] buf, string err) =>
         {
-            wait_response = false;
-
             switch (ev)
             { 
-                case KcpProject.v1.UdpSocket.cliEvent.Connected:
+                case KcpEvent.KCP_EV_CONNECT:
                     Console.WriteLine("connected.");
                     client.Send("Hello KCP.");
                     break;
-                case KcpProject.v1.UdpSocket.cliEvent.ConnectFailed:
+                case KcpEvent.KCP_EV_CONNFAILED:
                     Console.WriteLine("connect failed. {0}", err);
                     break;
-                case KcpProject.v1.UdpSocket.cliEvent.Disconnect:
+                case KcpEvent.KCP_EV_DISCONNECT:
                     Console.WriteLine("disconnect. {0}", err);
                     break;
-                case KcpProject.v1.UdpSocket.cliEvent.RcvMsg:
+                case KcpEvent.KCP_EV_MSG:
                     Console.WriteLine("recv message: {0}", System.Text.ASCIIEncoding.ASCII.GetString(buf) );
+                    client.Send(buf);
                     break;
             }
         });
 
         client.Connect(host, port);
 
-        while (wait_response)
-        {
-            client.Update();
-            System.Threading.Thread.Sleep(10);
-        }
-    }
-
-    static void test_v2(string host, UInt16 port)
-    {
-        var wait_response = true;
-
-        KcpProject.v2.UdpSocket client = null;
-
-        // 创建一个实例
-        client = new KcpProject.v2.UdpSocket((byte[] buf) => 
-        {
-            wait_response = false;
-            Console.WriteLine("recv message: {0}", System.Text.ASCIIEncoding.ASCII.GetString(buf));
-        });
-
-        // 绑定端口
-        client.Connect(host, port);
-
-        // 发送消息
-        client.Send("Hello KCP.");
-
-        // update.
-        while (wait_response)
+        while (!stop)
         {
             client.Update();
             System.Threading.Thread.Sleep(10);
@@ -73,13 +46,7 @@ class Program
     static void Main(string[] args)
     {
        // 测试v1版本，有握手过程，服务器决定conv的分配
-       //test_v1("192.168.1.2", 4444);
-
-       //Console.WriteLine("**********************************************************");
-
-       // 测试v2版本，没有握手过程，客户端自行决定conv的分配
-       // 适合配合 kcp-go
-        test_v2("192.168.1.2", 4455);
+       test_v1("127.0.0.1", 4000);
     }
 }
 

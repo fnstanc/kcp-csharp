@@ -40,12 +40,12 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="common\kcp.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
-    <Compile Include="common\switch_queue.cs" />
-    <Compile Include="v1\udp_socket_v1.cs" />
-    <Compile Include="v2\udp_socket_v2.cs" />
+    <Compile Include="src\common\kcp.cs" />
+    <Compile Include="src\common\kcp_common.cs" />
+    <Compile Include="src\common\switch_queue.cs" />
+    <Compile Include="src\kcp_client.cs" />
   </ItemGroup>
   <ItemGroup />
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
