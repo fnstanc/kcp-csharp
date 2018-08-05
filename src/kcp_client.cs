@@ -163,7 +163,6 @@ namespace KcpSharp.v1 {
                             kcpCommand_.cmd = KcpCmd.KCP_CMD_HEARTBEAT;
                             kcpCommand_.conv = conv_;
                             SendKcpCommand(kcpCommand_);
-                            Console.WriteLine("hearbeat {0}", conv_);
                         }
                     }
                 } break;
