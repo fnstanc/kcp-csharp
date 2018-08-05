@@ -6,25 +6,29 @@ using System.Net.Sockets;
 using System.Text;
 
 namespace KcpSharp.v1 {
-    // 客户端主动发送握手数据
-    // 服务器下发conv
     public class KcpClient
     {
+        enum Status {
+            None,
+            Connecting,
+            Connected,
+            Disconnect,
+            Disconnecting,
+            Timemout,
+        }
+        private UdpClient udpClient_;
+        private IPEndPoint ep_;
+        private IPEndPoint serverEp_;
+        private KcpEventCallback eventCallback_;
+        private KCP kcp_;
+        private bool needUpdate_;
+        private UInt32 nextUpdateTime_;
 
-        private UdpClient mUdpClient;
-        private IPEndPoint mIPEndPoint;
-        private IPEndPoint mSvrEndPoint;
-        private KcpEventCallback evHandler;
-        private KCP mKcp;
-        private bool mNeedUpdateFlag;
-        private UInt32 mNextUpdateTime;
+        private Status status_ = Status.None;
+        private UInt32 connectStartTime_;
+        private UInt32 lastConnectReqTime_;
 
-        private bool mInConnectStage;
-        private bool mConnectSucceed;
-        private UInt32 mConnectStartTime;
-        private UInt32 mLastSendConnectTime;
-
-        private SwitchQueue<byte[]> mRecvQueue = new SwitchQueue<byte[]>(128);
+        private SwitchQueue<byte[]> recvQueue_ = new SwitchQueue<byte[]>(128);
 
         private KcpCommand kcpCommand_ = new KcpCommand();
         private byte[] cmdBuf_ = new byte[8];
@@ -32,70 +36,80 @@ namespace KcpSharp.v1 {
 
         public KcpClient(KcpEventCallback handler)
         {
-            evHandler = handler;
+            eventCallback_ = handler;
         }
 
         public void Connect(string host, UInt16 port)
         {
-            mSvrEndPoint = new IPEndPoint(IPAddress.Parse(host), port);
-            mUdpClient = new UdpClient(host, port);
-            mUdpClient.Connect(mSvrEndPoint);
-
-            ResetState();
-
-            mInConnectStage = true;
-            mConnectStartTime = KcpUtils.Clock32();
-
-            mUdpClient.BeginReceive(ReceiveCallback, this);
+            Clean();
+            serverEp_ = new IPEndPoint(IPAddress.Parse(host), port);
+            udpClient_ = new UdpClient(host, port);
+            udpClient_.Connect(serverEp_);
+            status_ = Status.Connecting;
+            connectStartTime_ = KcpUtils.Clock32();
+            udpClient_.BeginReceive(ReceiveCallback, this);
         }
 
         void ReceiveCallback(IAsyncResult ar)
         {
-            byte[] data = mUdpClient.EndReceive(ar, ref mIPEndPoint);
+            if (udpClient_ == null)
+                return;
+
+            byte[] data = udpClient_.EndReceive(ar, ref ep_);
             if (null != data)
                 OnRecv(data);
 
-            if (mUdpClient != null)
+            if (udpClient_ != null)
             {
                 // try to receive again.
-                mUdpClient.BeginReceive(ReceiveCallback, this);
+                udpClient_.BeginReceive(ReceiveCallback, this);
             }
         }
 
         void OnRecv(byte[] buf)
         {
-            mRecvQueue.Push(buf);
+            recvQueue_.Push(buf);
         }
 
-        void ResetState()
+        void Clean()
         {
-            mNeedUpdateFlag = false;
-            mNextUpdateTime = 0;
-
-            mInConnectStage = false;
-            mConnectSucceed = false;
-            mConnectStartTime = 0;
-            mLastSendConnectTime = 0;
-            mRecvQueue.Clear();
+            status_ = Status.None;
             conv_ = 0;
-            mKcp = null;
+
+            needUpdate_ = false;
+            nextUpdateTime_ = 0;
+
+            connectStartTime_ = 0;
+            lastConnectReqTime_ = 0;
+            recvQueue_.Clear();
+            kcp_ = null;
+
+            if (udpClient_ != null) {
+                udpClient_.Close();
+                udpClient_ = null;
+            }
+
+            ep_ = null;
+            serverEp_ = null;
         }
 
         void InitKcp(UInt32 conv)
         {
             conv_ = conv;
-            mKcp = new KCP(conv, (byte[] buf, int size) =>
+            kcp_ = new KCP(conv, (byte[] buf, int size) =>
             {
-                mUdpClient.Send(buf, size);
+                SendUdpPacket(buf, size);
             });
 
-            mKcp.NoDelay(1, 10, 2, 1);
+            kcp_.NoDelay(1, 10, 2, 1);
         }
 
         public void Send(byte[] buf)
         {
-            mKcp.Send(buf);
-            mNeedUpdateFlag = true;
+            if (status_ != Status.Connected)
+                return;
+            kcp_.Send(buf);
+            needUpdate_ = true;
         }
 
         public void Send(string str)
@@ -106,67 +120,84 @@ namespace KcpSharp.v1 {
         public void Update()
         {
             uint current = KcpUtils.Clock32();
-            if (mInConnectStage)
-            {
-                HandleConnectAck();
 
-                if (ConnectTimeout(current))
-                {
-                    evHandler(0, KcpEvent.KCP_EV_CONNFAILED, null, "Timeout");
-                    mInConnectStage = false;
-                    return;
+            switch(status_) {
+                case Status.Connecting: {
+                    HandleConnectAck();
+                    if (ConnectTimeout(current))
+                    {
+
+                        Clean();
+                        status_ = Status.Timemout;
+                        eventCallback_(0, KcpEvent.KCP_EV_CONNFAILED, null, "Timeout");
+                        return;
+                    }
+                    if (NeedSendConnectReq(current))
+                    {
+                        lastConnectReqTime_ = current;
+                        kcpCommand_.cmd = KcpCmd.KCP_CMD_CONNECT_REQ;
+                        SendKcpCommand(kcpCommand_);
+                    }
+                } break;
+                case Status.Connected: {
+                    ProcessRecvQueue();
+
+                    if (needUpdate_ || current >= nextUpdateTime_)
+                    {
+                        kcp_.Update(current);
+                        nextUpdateTime_ = kcp_.Check(current);
+                        needUpdate_ = false;
+                    }
+                } break;
+                case Status.Disconnecting: {
+
                 }
-
-                if (NeedSendConnectReq(current))
-                {
-                    mLastSendConnectTime = current;
-                    kcpCommand_.cmd = KcpCmd.KCP_CMD_CONNECT_REQ;
-                    SendKcpCommand(kcpCommand_);
-                }
-
-                return;
-            }
-
-            if (mConnectSucceed)
-            {
-                ProcessRecvQueue();
-
-                if (mNeedUpdateFlag || current >= mNextUpdateTime)
-                {
-                    mKcp.Update(current);
-                    mNextUpdateTime = mKcp.Check(current);
-                    mNeedUpdateFlag = false;
-                }
+                break;
             }
         }
 
         public void Close()
         {
-            mUdpClient.Close();
-            evHandler(conv_, KcpEvent.KCP_EV_DISCONNECT, null, "Closed");
+            if (status_ == Status.Connected) {
+                status_ = Status.Disconnecting;
+                kcpCommand_.cmd = KcpCmd.KCP_CMD_DISCONNECT;
+                kcpCommand_.conv = conv_;
+                SendKcpCommand(kcpCommand_);
+            } else {
+                OnDisconnect();
+            }
+        }
+
+        public void OnDisconnect() {
+            if (status_ != Status.Disconnect) {
+                status_ = Status.Disconnect;
+                uint conv = conv_;
+                Clean();
+                status_ = Status.Disconnect;
+                eventCallback_(conv, KcpEvent.KCP_EV_DISCONNECT, null, "Closed");
+            }
         }
 
         private void SendUdpPacket(byte[] buf, int size) {
-            if (mUdpClient != null)
-                mUdpClient.Send(buf, size);
+            if (udpClient_ != null)
+                udpClient_.Send(buf, size);
         }
 
         void HandleConnectAck()
         {
-            if (mRecvQueue.Empty())
-                mRecvQueue.Switch();
+            if (recvQueue_.Empty())
+                recvQueue_.Switch();
 
-            while (mInConnectStage && !mRecvQueue.Empty())
+            while (status_ == Status.Connecting && !recvQueue_.Empty())
             {
-                var buf = mRecvQueue.Pop();
+                var buf = recvQueue_.Pop();
                 if (kcpCommand_.Decode(buf, buf.Length) < 0)
                     return;
 
                 if (kcpCommand_.cmd == KcpCmd.KCP_CMD_CONNECT_ACK) {
                     InitKcp(kcpCommand_.conv);
-                    mInConnectStage = false;
-                    mConnectSucceed = true;
-                    evHandler(conv_, KcpEvent.KCP_EV_CONNECT, null, null);
+                    status_ = Status.Connected;
+                    eventCallback_(conv_, KcpEvent.KCP_EV_CONNECT, null, null);
                     break;
                 }
             }
@@ -174,12 +205,12 @@ namespace KcpSharp.v1 {
 
         void ProcessRecvQueue()
         {
-            if (mRecvQueue.Empty())
-                mRecvQueue.Switch();
+            if (recvQueue_.Empty())
+                recvQueue_.Switch();
 
-            while (!mRecvQueue.Empty())
+            while (status_ == Status.Connected && !recvQueue_.Empty())
             {
-                var buf = mRecvQueue.Pop();
+                var buf = recvQueue_.Pop();
 
                 UInt32 conv = 0;
                 if (KCP.ikcp_decode32u(buf, 0, ref conv) < 0) {
@@ -191,9 +222,12 @@ namespace KcpSharp.v1 {
                     if (kcpCommand_.Decode(buf, buf.Length) < 0)
                         continue;
 
+                    if (conv_ != kcpCommand_.conv)
+                        continue;
+
                     switch(kcpCommand_.cmd) {
                         case KcpCmd.KCP_CMD_DISCONNECT: {
-
+                            OnDisconnect();
                         }
                         break;
                         case KcpCmd.KCP_CMD_HEARTBEAT: {
@@ -202,15 +236,15 @@ namespace KcpSharp.v1 {
                         break;
                     }
                 } else {
-                    mKcp.Input(buf);
-                    mNeedUpdateFlag = true;
+                    kcp_.Input(buf);
+                    needUpdate_ = true;
 
-                    for (var size = mKcp.PeekSize(); size > 0; size = mKcp.PeekSize())
+                    for (var size = kcp_.PeekSize(); size > 0; size = kcp_.PeekSize())
                     {
                         var buffer = new byte[size];
-                        if (mKcp.Recv(buffer) > 0)
+                        if (kcp_.Recv(buffer) > 0)
                         {
-                            evHandler(conv, KcpEvent.KCP_EV_MSG, buffer, null);
+                            eventCallback_(conv, KcpEvent.KCP_EV_MSG, buffer, null);
                         }
                     }
                 }
@@ -220,12 +254,12 @@ namespace KcpSharp.v1 {
 
         bool ConnectTimeout(UInt32 current)
         {
-            return current - mConnectStartTime > KcpConst.KCP_CONNECT_TIMEOUT;
+            return current - connectStartTime_ > KcpConst.KCP_CONNECT_TIMEOUT;
         }
 
         bool NeedSendConnectReq(UInt32 current)
         {
-            return current - mLastSendConnectTime > KcpConst.KCP_CONNECT_REQ_INTERVAL;
+            return current - lastConnectReqTime_ > KcpConst.KCP_CONNECT_REQ_INTERVAL;
         }
 
         private void SendKcpCommand(KcpCommand cmd) {
