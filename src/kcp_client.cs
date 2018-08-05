@@ -28,6 +28,7 @@ namespace KcpSharp.v1 {
         private UInt32 connectStartTime_;
         private UInt32 lastConnectReqTime_;
         private UInt32 lastRecvTime_;
+        private UInt32 lastHearbeatTime_;
 
         private SwitchQueue<byte[]> recvQueue_ = new SwitchQueue<byte[]>(128);
 
@@ -82,6 +83,7 @@ namespace KcpSharp.v1 {
             lastRecvTime_ = 0;
             connectStartTime_ = 0;
             lastConnectReqTime_ = 0;
+            lastHearbeatTime_ = 0;
             recvQueue_.Clear();
             kcp_ = null;
 
@@ -149,11 +151,20 @@ namespace KcpSharp.v1 {
                         status_ = Status.Timemout;
                         eventCallback_(conv, KcpEvent.KCP_EV_DISCONNECT, null, "Timeout");
                     }
-                    else if (needUpdate_ || current >= nextUpdateTime_)
-                    {
-                        kcp_.Update(current);
-                        nextUpdateTime_ = kcp_.Check(current);
-                        needUpdate_ = false;
+                    else {
+                        if (needUpdate_ || current >= nextUpdateTime_)
+                        {
+                            kcp_.Update(current);
+                            nextUpdateTime_ = kcp_.Check(current);
+                            needUpdate_ = false;
+                        }
+                        if (NeedHeartbeat(current)) {
+                            lastHearbeatTime_ = current;
+                            kcpCommand_.cmd = KcpCmd.KCP_CMD_HEARTBEAT;
+                            kcpCommand_.conv = conv_;
+                            SendKcpCommand(kcpCommand_);
+                            Console.WriteLine("hearbeat {0}", conv_);
+                        }
                     }
                 } break;
                 case Status.Disconnecting: {
@@ -220,7 +231,6 @@ namespace KcpSharp.v1 {
             {
                 var buf = recvQueue_.Pop();
 
-                lastRecvTime_ = now;
 
                 UInt32 conv = 0;
                 if (KCP.ikcp_decode32u(buf, 0, ref conv) < 0) {
@@ -235,6 +245,7 @@ namespace KcpSharp.v1 {
                     if (conv_ != kcpCommand_.conv)
                         continue;
 
+                    lastRecvTime_ = now;
                     switch(kcpCommand_.cmd) {
                         case KcpCmd.KCP_CMD_DISCONNECT: {
                             OnDisconnect();
@@ -246,6 +257,10 @@ namespace KcpSharp.v1 {
                         break;
                     }
                 } else {
+                    if (conv_ != kcpCommand_.conv)
+                        continue;
+                    lastRecvTime_ = now;
+
                     kcp_.Input(buf);
                     needUpdate_ = true;
 
@@ -280,6 +295,13 @@ namespace KcpSharp.v1 {
 
         private bool SessionTimeout(UInt32 current) {
             return current - lastRecvTime_ > KcpConst.KCP_SESSION_TIME_OUT;
+        }
+
+        private bool NeedHeartbeat(UInt32 now) {
+            if (now - lastRecvTime_ > KcpConst.KCP_HEARTBEAT_INTERVAL) {
+                return now - lastHearbeatTime_ > KcpConst.KCP_HEARTBEAT_INTERVAL;
+            }
+            return false;
         }
     }
 
